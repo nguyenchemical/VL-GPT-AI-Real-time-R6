@@ -346,6 +346,7 @@ body.light .set-row{background:rgba(0,0,0,.04);}
       <div class="mbar-bg"><div class="mbar" id="meterBar"></div></div>
       <div class="meter-bot">
         <span>Hội tụ AI: <b id="meterScore">0%</b></span>
+        <span class="hint" title="Chỉ số hội tụ tương đối theo phân phối mô hình và các bộ đã sinh; không phải xác suất trúng Jackpot">Chỉ số mô hình, không phải xác suất trúng</span>
         <span>Tích lũy: <b id="jackpotVal">—</b></span>
       </div>
     </div>
@@ -410,7 +411,7 @@ function getPredictQty(){
 
 (function(){
   try{
-    var m={name:"Vietlott GPT AI Real-time",short_name:"GPT AI Real-time",description:"Vietlott GPT AI Real-time",start_url:"./index.html",display:"standalone",background_color:"#141e30",theme_color:"#141e30",icons:[{src:"icon.png",sizes:"192x192",type:"image/png"},{src:"icon.png",sizes:"512x512",type:"image/png"}]};
+    var m={name:"GPT Real-time",short_name:"GPT Real-time",description:"Vietlott GPT AI Real-time",start_url:"./index.html",display:"standalone",background_color:"#141e30",theme_color:"#141e30",icons:[{src:"icon.png",sizes:"192x192",type:"image/png"},{src:"icon.png",sizes:"512x512",type:"image/png"}]};
     var u=URL.createObjectURL(new Blob([JSON.stringify(m)],{type:"application/json"}));
     var el=document.getElementById("pwa-manifest-link"); if(el) el.href=u;
   }catch(e){}
@@ -527,19 +528,16 @@ function getActiveProbs(gameType){
 }
 
 function weightedSampleUnique(candidates, count, used){
+  // Chọn xác định: xếp theo xác suất từ mô hình/dữ liệu, phá hòa bằng số phiên và game.
+  // Không dùng random; đổi phiên huấn luyện sẽ dịch điểm bắt đầu để đa dạng bộ số.
+  var phase=(Number(trainCount)||0)*17 + (String(currentGame||"").split("").reduce(function(a,c){return a+c.charCodeAt(0)},0));
   var pool=candidates.map(function(c){
-    return {number:c.number, prob:c.prob, w: used && used.has(c.number) ? c.prob*0.12 : Math.max(c.prob,0.001)};
-  });
-  var selected=[];
-  for(var i=0;i<count&&pool.length;i++){
-    var total=pool.reduce(function(s,x){return s+x.w},0);
-    var r=Math.random()*total;
-    for(var j=0;j<pool.length;j++){
-      r-=pool[j].w;
-      if(r<=0){ selected.push(pool[j].number); pool.splice(j,1); break; }
-    }
-  }
-  return selected;
+    var n=Number(c.number), prob=Math.max(Number(c.prob)||0,0.001);
+    var tie=((n*37+phase*13)%997)/997000;
+    return {number:n,prob:prob,score:Math.log(prob)+tie};
+  }).filter(function(c){return Number.isFinite(c.number)&&(!used||!used.has(c.number));});
+  pool.sort(function(a,b){return b.score-a.score||a.number-b.number;});
+  return pool.slice(0,count).map(function(c){return c.number;});
 }
 
 /**
@@ -684,7 +682,7 @@ function sampleFromProbs(gameType, probs){
       });
       var maxS=Math.max.apply(null,spFreq.concat([1]));
       var spCand=spFreq.map(function(f,i){return {number:i+1,prob:Math.max(f/maxS,0.05)}});
-      var sp=weightedSampleUnique(spCand,1,new Set())[0]||(1+Math.floor(Math.random()*12));
+      var sp=weightedSampleUnique(spCand,1,new Set())[0]||1;
       return main.concat([sp]);
     }
   }
@@ -1303,7 +1301,7 @@ async function trainAndPredict(){
     }
     model.compile({optimizer:tf.train.adam(0.01),loss:"binaryCrossentropy"});
     progress.style.width="25%";
-    await model.fit(xs,ys,{epochs:epochs,batchSize:Math.min(16,xs.shape[0]),shuffle:true,callbacks:{onEpochEnd:async function(epoch,logs){
+    await model.fit(xs,ys,{epochs:epochs,batchSize:Math.min(16,xs.shape[0]),shuffle:false,callbacks:{onEpochEnd:async function(epoch,logs){
       progress.style.width=Math.floor(25+((epoch+1)/epochs)*60)+"%";
       logTrain("Epoch <b>"+(epoch+1)+"/"+epochs+"</b> loss:<b>"+(logs.loss!=null?logs.loss.toFixed(4):"—")+"</b>");
       await tf.nextFrame();
@@ -1339,7 +1337,9 @@ async function trainAndPredict(){
       var selected=sampleFromProbs(gameType, predictionData);
       var key=selected.join("-");
       var attempts=0;
-      while(allSets.some(function(s){return s.join("-")===key})&&attempts++<40){
+      while(allSets.some(function(s){return s.join("-")===key})&&attempts++<Math.min(200,spec.maxN)){
+        // Dịch phiên xác định để chọn bộ kế tiếp, không bốc thăm.
+        trainCount++;
         selected=sampleFromProbs(gameType, predictionData);
         key=selected.join("-");
       }
